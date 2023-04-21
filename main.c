@@ -657,6 +657,7 @@ int main() {
     CPU_Exec();
     CPU_Exec();
     CPU_Exec();
+
     assert(CPU.F_C == 1);
     assert(CPU.F_V == 0);
     printf("SUCCESS!\n");
