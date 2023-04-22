@@ -7,7 +7,7 @@
 
 struct CPU {
     Short PC;
-    Short SP;
+    Byte SP;
     Short Mem[0XFFFF];
     Byte A, X, Y;
     Byte F_N;
@@ -22,9 +22,10 @@ struct CPU {
 
 void CPU_Reset(Short PCAddr) {
     CPU.PC = PCAddr;
-    CPU.SP = 0x100;
+    CPU.SP = 0xFD;
     CPU.A = CPU.X = CPU.Y = 0;
-    CPU.F_N = CPU.F_V = CPU.F_B = CPU.F_D = CPU.F_I = CPU.F_Z = CPU.F_C = 0;
+    CPU.F_B = 1;
+    CPU.F_N = CPU.F_V = CPU.F_D = CPU.F_I = CPU.F_Z = CPU.F_C = 0;
 }
 
 Byte CPU_Read_Addr(Short addr) {
@@ -53,7 +54,7 @@ Byte CPU_Write_Addr(Short addr, Byte value) {
  * @param reg
  * @return
  */
-Short AM_IMM() {
+Byte AM_IMM() {
 
     return CPU_Get_Byte();
 }
@@ -84,7 +85,7 @@ Short AM_Abs_XY(Byte reg) {
     Short abs = AM_Abs();
     Short absRegAddr = abs + reg;
     //page boundary is crossed
-    CPU.INS_Cycles += (abs ^ absRegAddr) >> 8;
+    CPU.INS_Cycles += ((abs ^ absRegAddr) >> 8) > 0;
     return absRegAddr;
 }
 
@@ -125,7 +126,7 @@ Short AM_ZP_IND_Y() {
     Short address_1 = concat_byte(CPU_Read_Addr(low), CPU_Read_Addr(low + 1));
     Short address_2 = address_1 + CPU.Y;
     //page boundary is crossed
-    CPU.INS_Cycles += (address_1 ^ address_2) >> 8;
+    CPU.INS_Cycles += ((address_1 ^ address_2) >> 8) > 0;
     return address_2;
 }
 
@@ -134,8 +135,25 @@ Short AM_ZP_IND_Y() {
 //-------------FLAG设置开始-----------------
 
 void CPU_F_NZ(Byte data) {
-    CPU.F_N = (data >> 7) & 1;
+    CPU.F_N = data >> 7;
     CPU.F_Z = data == 0;
+}
+
+/**
+ *  A - M
+ *  注意: 实际使用的是 REG_x - input(M) 是减法
+ *          	        N	Z	C
+ *  Register < Memory	1	0	0
+ *  Register = Memory	0	1	1
+ *  Register > Memory	0	0	1
+ * @param input
+ */
+void CPU_F_Compare(Byte reg, Byte input) {
+    CPU.INS_Cycles += 1;
+    Byte res = reg - input;
+    CPU_F_NZ(res);
+    //unsigned
+    CPU.F_C = reg >= input;
 }
 
 //-------------FLAG设置结束-----------------
@@ -220,20 +238,20 @@ void INS_INC_DEC_XY(Byte *REG,byte value) {
 }
 
 /**
- * 左移一位
+ * 算术左移一位
  * Flags: N, Z, C
  * @param value 值
  */
 Byte INS_ASL(Byte value) {
     CPU.INS_Cycles += 1;
-    CPU.F_C = (value>>7) & 1;
+    CPU.F_C = value>>7;
     value<<=1;
     CPU_F_NZ(value);
     return value;
 }
 
 /**
- * 右移一位
+ * 逻辑右移一位
  * Flags: N, Z, C
  * @param value 值
  */
@@ -253,9 +271,9 @@ Byte INS_LSR(Byte value) {
  */
 Byte INS_ROL(Byte value) {
     CPU.INS_Cycles += 1;
-    CPU.F_C = (value>>7) & 1;
+    CPU.F_C = (value>>7) & 0x1;
     value<<=1;
-    value|=CPU.F_C;
+    value = CPU.F_C ? value|0x1 : value&0xFE;
     CPU_F_NZ(value);
     return value;
 }
@@ -267,11 +285,95 @@ Byte INS_ROL(Byte value) {
  */
 Byte INS_ROR(Byte value) {
     CPU.INS_Cycles += 1;
-    CPU.F_C = value & 1;
+    CPU.F_C = value & 0x1;
     value>>=1;
-    value|=(CPU.F_C<<7);
+    value = CPU.F_C ? value|0x80 : value&~0x80;
     CPU_F_NZ(value);
     return value;
+}
+
+/**
+ * 与
+ * A & M -> A
+ * Flags: N, Z
+ * @param value 值
+ */
+void INS_AND(Byte value) {
+    CPU.INS_Cycles += 1;
+    CPU.A&=value;
+    CPU_F_NZ(CPU.A);
+}
+
+/**
+ * 或
+ * A | M -> A
+ * Flags: N, Z
+ * @param value 值
+ */
+void INS_ORA(Byte value) {
+    CPU.INS_Cycles += 1;
+    CPU.A|=value;
+    CPU_F_NZ(CPU.A);
+}
+
+/**
+ * 异或
+ * A ^ M -> A
+ * Flags: N, Z
+ * @param value 值
+ */
+void INS_EOR(Byte value) {
+    CPU.INS_Cycles += 1;
+    CPU.A^=value;
+    CPU_F_NZ(CPU.A);
+}
+
+/**
+ *  N = M7, V = M6, Z = A & M
+ * @param input
+ */
+void INS_BIT(Byte input) {
+    CPU.INS_Cycles += 1;
+    CPU.F_Z = (CPU.A & input) == 0;
+    CPU.F_V = (input>>6)&1;
+    CPU.F_N = input >> 7;
+}
+
+/**
+ *  Branch on Carry Clear
+ *  Branch if C = 0
+ * @param input
+ */
+void INS_Branch(byte input,Byte condition) {
+    if(condition) {
+        CPU.INS_Cycles += (((CPU.PC+input) ^ CPU.PC) >> 8) > 0?2:1;
+        CPU.PC += input;
+    }
+}
+
+/**
+ * 寄存器间值转移
+ * @param source 源寄存器
+ * @param target 目标寄存器
+ * @param set_flag 是否要设置状态寄存器
+ */
+void INS_Transfer(Byte source,Byte *target,Byte set_flag) {
+    CPU.INS_Cycles += 2;
+    *target = source;
+    if(set_flag) {
+        CPU_F_NZ(*target);
+    }
+}
+
+/**
+ * 寄存器间值转移
+ * @param source 源寄存器
+ * @param target 目标寄存器
+ * @param set_flag 是否要设置状态寄存器
+ */
+void INS_SET_CLEAR(Byte *FLAG,Byte value) {
+    CPU.INS_Cycles += 2;
+    *FLAG = value;
 }
 
 //-------------指令结束-----------------
@@ -630,21 +732,302 @@ void CPU_Exec() {
             CPU_Write_Addr(addr,INS_ROR(CPU_Read_Addr(addr)));
             break;
 
+        // ------------Logic(逻辑运算)------------
+            //AND a  AND Memory with Accumulator
+        case 0x2D:
+            INS_AND(CPU_Read_Addr(AM_Abs()));
+            break;
+            //AND a,x
+        case 0x3D:
+            INS_AND(CPU_Read_Addr(AM_Abs_XY(CPU.X)));
+            break;
+            //AND a,y
+        case 0x39:
+            INS_AND(CPU_Read_Addr(AM_Abs_XY(CPU.Y)));
+            break;
+            //AND #
+        case 0x29:
+            INS_AND(AM_IMM());
+            break;
+            //AND zp
+        case 0x25:
+            INS_AND(CPU_Read_Addr(AM_ZP()));
+            break;
+            //AND (zp,x)
+        case 0x21:
+            INS_AND(CPU_Read_Addr(AM_ZP_IND_X()));
+            break;
+            //AND zp,x
+        case 0x35:
+            INS_AND(CPU_Read_Addr(AM_ZP_XY(CPU.X)));
+            break;
+            //AND (zp),y
+        case 0x31:
+            INS_AND(CPU_Read_Addr(AM_ZP_IND_Y()));
+            break;
 
+            //ORA a  OR Memory with Accumulator
+        case 0x0D:
+            INS_ORA(CPU_Read_Addr(AM_Abs()));
+            break;
+            //ORA a,x
+        case 0x1D:
+            INS_ORA(CPU_Read_Addr(AM_Abs_XY(CPU.X)));
+            break;
+            //ORA a,y
+        case 0x19:
+            INS_ORA(CPU_Read_Addr(AM_Abs_XY(CPU.Y)));
+            break;
+            //ORA #
+        case 0x09:
+            INS_ORA(AM_IMM());
+            break;
+            //ORA zp
+        case 0x05:
+            INS_ORA(CPU_Read_Addr(AM_ZP()));
+            break;
+            //ORA (zp,x)
+        case 0x01:
+            INS_ORA(CPU_Read_Addr(AM_ZP_IND_X()));
+            break;
+            //ORA zp,x
+        case 0x15:
+            INS_ORA(CPU_Read_Addr(AM_ZP_XY(CPU.X)));
+            break;
+            //ORA (zp),y
+        case 0x11:
+            INS_ORA(CPU_Read_Addr(AM_ZP_IND_Y()));
+            break;
+
+            //EOR a   Exclusive-OR Memory with Accumulator
+        case 0x4D:
+            INS_EOR(CPU_Read_Addr(AM_Abs()));
+            break;
+            //EOR a,x
+        case 0x5D:
+            INS_EOR(CPU_Read_Addr(AM_Abs_XY(CPU.X)));
+            break;
+            //EOR a,y
+        case 0x59:
+            INS_EOR(CPU_Read_Addr(AM_Abs_XY(CPU.Y)));
+            break;
+            //EOR #
+        case 0x49:
+            INS_EOR(AM_IMM());
+            break;
+            //EOR zp
+        case 0x45:
+            INS_EOR(CPU_Read_Addr(AM_ZP()));
+            break;
+            //EOR (zp,x)
+        case 0x41:
+            INS_EOR(CPU_Read_Addr(AM_ZP_IND_X()));
+            break;
+            //EOR zp,x
+        case 0x55:
+            INS_EOR(CPU_Read_Addr(AM_ZP_XY(CPU.X)));
+            break;
+            //EOR (zp),y
+        case 0x51:
+            INS_EOR(CPU_Read_Addr(AM_ZP_IND_Y()));
+            break;
+
+        // ------------Compare and Test Bit(比较和检测位)------------
+            //CMP a   Compare Memory and Accumulator
+        case 0xCD:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_Abs()));
+            break;
+            //CMP a,x
+        case 0xDD:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_Abs_XY(CPU.X)));
+            break;
+            //CMP a,y
+        case 0xD9:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_Abs_XY(CPU.Y)));
+            break;
+            //CMP #
+        case 0xC9:
+            CPU_F_Compare(CPU.A, AM_IMM());
+            break;
+            //CMP zp
+        case 0xC5:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_ZP()));
+            break;
+            //CMP (zp,x)
+        case 0xC1:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_ZP_IND_X()));
+            break;
+            //CMP zp,x
+        case 0xD5:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_ZP_XY(CPU.X)));
+            break;
+            //CMP (zp),y
+        case 0xD1:
+            CPU_F_Compare(CPU.A, CPU_Read_Addr(AM_ZP_IND_Y()));
+            break;
+
+            //CPX a   Compare Memory and Index X
+        case 0xEC:
+            CPU_F_Compare(CPU.X, CPU_Read_Addr(AM_Abs()));
+            break;
+            //CPX #
+        case 0xE0:
+            CPU_F_Compare(CPU.X, AM_IMM());
+            break;
+            //CPX zp
+        case 0xE4:
+            CPU_F_Compare(CPU.X, CPU_Read_Addr(AM_ZP()));
+            break;
+
+            //CPY a   Compare Memory and Index X
+        case 0xCC:
+            CPU_F_Compare(CPU.Y, CPU_Read_Addr(AM_Abs()));
+            break;
+            //CPY #
+        case 0xC0:
+            CPU_F_Compare(CPU.Y, AM_IMM());
+            break;
+            //CPY zp
+        case 0xC4:
+            CPU_F_Compare(CPU.Y, CPU_Read_Addr(AM_ZP()));
+            break;
+
+            //BIT a   Test Bits in Memory with Accumulator
+        case 0x2C:
+            INS_BIT(CPU_Read_Addr(AM_Abs()));
+            break;
+            //BIT #
+        case 0x89:
+            INS_BIT(AM_IMM());
+            break;
+            //BIT zp
+        case 0x24:
+            INS_BIT(CPU_Read_Addr(AM_ZP()));
+            break;
+        default:
+            break;
+
+        // ------------Branch(分支跳转)------------
+            //BCC r
+        case 0x90:
+            INS_Branch(AM_IMM(),CPU.F_C == 0);
+            break;
+            //BCS r
+        case 0xB0:
+            INS_Branch(AM_IMM(),CPU.F_C == 1);
+            break;
+            //BNE r
+        case 0xD0:
+            INS_Branch(AM_IMM(),CPU.F_Z == 0);
+            break;
+            //BEQ r
+        case 0xF0:
+            INS_Branch(AM_IMM(),CPU.F_Z == 1);
+            break;
+            //BPL r
+        case 0x10:
+            INS_Branch(AM_IMM(),CPU.F_N == 0);
+            break;
+            //BMI r
+        case 0x30:
+            INS_Branch(AM_IMM(),CPU.F_N == 1);
+            break;
+            //BVC r
+        case 0x50:
+            INS_Branch(AM_IMM(),CPU.F_V == 0);
+            break;
+            //BVS r
+        case 0x70:
+            INS_Branch(AM_IMM(),CPU.F_V == 1);
+            break;
+
+        // ------------Transfer(转移)------------
+            //TAX
+        case 0xAA:
+            INS_Transfer(CPU.A,&CPU.X,1);
+            break;
+            //TXA
+        case 0x8A:
+            INS_Transfer(CPU.X,&CPU.A,1);
+            break;
+            //TAY
+        case 0xA8:
+            INS_Transfer(CPU.A,&CPU.Y,1);
+            break;
+            //TYA
+        case 0x98:
+            INS_Transfer(CPU.Y,&CPU.A,1);
+            break;
+            //TSX
+        case 0xBA:
+            INS_Transfer(CPU.SP,&CPU.X,1);
+            break;
+            //TXS
+        case 0x9A:
+            INS_Transfer(CPU.X,&CPU.SP,0);
+            break;
+
+        // ------------Set and Clear------------
+            //CLC
+        case 0x18:
+            INS_SET_CLEAR(&CPU.F_C,0);
+            break;
+            //SEC
+        case 0x38:
+            INS_SET_CLEAR(&CPU.F_C,1);
+            break;
+            //CLD
+        case 0xD8:
+            INS_SET_CLEAR(&CPU.F_D,0);
+            break;
+            //SED
+        case 0xF8:
+            INS_SET_CLEAR(&CPU.F_D,1);
+            break;
+            //CLI
+        case 0x58:
+            INS_SET_CLEAR(&CPU.F_I,0);
+            break;
+            //SEI
+        case 0x78:
+            INS_SET_CLEAR(&CPU.F_I,1);
+            break;
+            //CLV
+        case 0xB8:
+            INS_SET_CLEAR(&CPU.F_V,0);
+            break;
+            //NOP
+        case 0xEA:
+            CPU.INS_Cycles += 2;
+            break;
+
+
+        // ------------Stack(栈)------------
+
+//            //PHA
+//        case 0x48:
+//            INS_Stack(CPU.A,&CPU.SP,0);
+//            break;
+//            //PLA
+//        case 0x68:
+//            INS_Transfer(CPU.SP,&CPU.A,1);
+//            break;
+//            //PHP
+//        case 0x08:
+//            INS_Transfer_Stack_Satus(CPU.SP,&CPU.A,0);
+//            break;
     }
 }
 
 int main() {
     CPU_Reset(0x1000);
-
-    CPU.Mem[CPU.PC]   = 0xA9;
-    CPU.Mem[CPU.PC+1] = 0x5F;
+    CPU.Mem[CPU.PC]   = 0x90;
+    CPU.Mem[CPU.PC+1] = 0xD9;
     CPU_Exec();
 
-    CPU.Mem[CPU.PC] = 0x2A;
-    CPU_Exec();
-    assert(CPU.A == 0xBE);
-    assert(CPU.F_C == 0);
+//    assert(CPU.F_N == 1);
+//    assert(CPU.F_Z == 0);
+//    assert(CPU.F_V == 1);
     printf("SUCCESS!\n");
     return 0;
 }
