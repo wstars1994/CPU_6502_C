@@ -20,10 +20,8 @@ struct CPU {
     Byte INS_Cycles;
 } CPU;
 
-void CPU_Flag_N(Byte a);
-
-void CPU_Reset() {
-    CPU.PC = 0x0600;
+void CPU_Reset(Short PCAddr) {
+    CPU.PC = PCAddr;
     CPU.SP = 0x100;
     CPU.A = CPU.X = CPU.Y = 0;
     CPU.F_N = CPU.F_V = CPU.F_B = CPU.F_D = CPU.F_I = CPU.F_Z = CPU.F_C = 0;
@@ -136,7 +134,7 @@ Short AM_ZP_IND_Y() {
 //-------------FLAG设置开始-----------------
 
 void CPU_F_NZ(Byte data) {
-    CPU.F_N = (data >> 8) & 1;
+    CPU.F_N = (data >> 7) & 1;
     CPU.F_Z = data == 0;
 }
 
@@ -228,7 +226,7 @@ void INS_INC_DEC_XY(Byte *REG,byte value) {
  */
 Byte INS_ASL(Byte value) {
     CPU.INS_Cycles += 1;
-    CPU.F_C = (value & 0x80) > 0;
+    CPU.F_C = (value>>7) & 1;
     value<<=1;
     CPU_F_NZ(value);
     return value;
@@ -241,7 +239,7 @@ Byte INS_ASL(Byte value) {
  */
 Byte INS_LSR(Byte value) {
     CPU.INS_Cycles += 1;
-    CPU.F_C = (value & 1) > 0;
+    CPU.F_C = value & 1;
     value>>=1;
     CPU_F_NZ(value);
     return value;
@@ -637,29 +635,16 @@ void CPU_Exec() {
 }
 
 int main() {
-    CPU_Reset();
+    CPU_Reset(0x1000);
 
     CPU.Mem[CPU.PC]   = 0xA9;
-    CPU.Mem[CPU.PC+1] = 0x01;
-
-    CPU.Mem[CPU.PC+2] = 0x8D;
-    CPU.Mem[CPU.PC+3] = 0x00;
-    CPU.Mem[CPU.PC+4] = 0x20;
-
-    CPU.Mem[CPU.PC+5] = 0xA9;
-    CPU.Mem[CPU.PC+6] = 0xFF;
-
-    CPU.Mem[CPU.PC+7] = 0xED;
-    CPU.Mem[CPU.PC+8] = 0x00;
-    CPU.Mem[CPU.PC+9] = 0x20;
-
-    CPU_Exec();
-    CPU_Exec();
-    CPU_Exec();
+    CPU.Mem[CPU.PC+1] = 0x5F;
     CPU_Exec();
 
-    assert(CPU.F_C == 1);
-    assert(CPU.F_V == 0);
+    CPU.Mem[CPU.PC] = 0x2A;
+    CPU_Exec();
+    assert(CPU.A == 0xBE);
+    assert(CPU.F_C == 0);
     printf("SUCCESS!\n");
     return 0;
 }
