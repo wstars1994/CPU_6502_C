@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <assert.h>
+#include "include/compiler.h"
 
 #define Byte unsigned char
 #define byte char
@@ -22,7 +23,7 @@ struct CPU {
 
 void CPU_Reset(Short PCAddr) {
     CPU.PC = PCAddr;
-    CPU.SP = 0xFD;
+    CPU.SP = 0xFF;
     CPU.A = CPU.X = CPU.Y = 0;
     CPU.F_B = 1;
     CPU.F_N = CPU.F_V = CPU.F_D = CPU.F_I = CPU.F_Z = CPU.F_C = 0;
@@ -44,6 +45,48 @@ Short concat_byte(Byte low, Byte high) {
 Byte CPU_Write_Addr(Short addr, Byte value) {
     CPU.INS_Cycles += 1;
     return CPU.Mem[addr] = value;
+}
+
+void CPU_Stack_Push_Byte(Byte value) {
+    CPU_Write_Addr(CPU.SP,value);
+    CPU.SP--;
+}
+
+Byte CPU_Stack_Pull_Byte() {
+    CPU.SP++;
+    return CPU_Read_Addr(CPU.SP);
+}
+
+void CPU_Stack_Push_Short(Short value) {
+    CPU_Stack_Push_Byte(value&0xff);
+    CPU_Stack_Push_Byte((value>>8)&0xff);
+}
+
+Short CPU_Stack_Pull_Short() {
+    Byte high = CPU_Stack_Pull_Byte();
+    Byte low = CPU_Stack_Pull_Byte();
+    return concat_byte(low,high);
+}
+
+void Pull_Flag() {
+    Byte flag = CPU_Stack_Pull_Byte();
+    CPU.F_N = flag>>7;
+    CPU.F_V = (flag>>6)&1;
+    CPU.F_D = (flag>>3)&1;
+    CPU.F_I = (flag>>2)&1;
+    CPU.F_Z = (flag>>1)&1;
+    CPU.F_C = flag&1;
+    CPU.INS_Cycles += 1;
+}
+
+void Push_Flag() {
+    Byte flag = (CPU.F_N<<7)
+                | (CPU.F_V<<6)
+                | (CPU.F_D<<3)
+                | (CPU.F_I<<2)
+                | (CPU.F_Z<<1)
+                | CPU.F_C;
+    CPU_Stack_Push_Byte(flag);
 }
 
 //-------------寻址方式开始-----------------
@@ -109,7 +152,7 @@ Short AM_ZP_XY(Byte reg) {
 }
 
 /**
- * 零页索引直接寻址 X
+ * 零页索引间接寻址 X
  * @return
  */
 Short AM_ZP_IND_X() {
@@ -118,7 +161,7 @@ Short AM_ZP_IND_X() {
 }
 
 /**
- * 零页直接索引寻址 Y
+ * 零页间接索引寻址 Y
  * @return
  */
 Short AM_ZP_IND_Y() {
@@ -128,6 +171,15 @@ Short AM_ZP_IND_Y() {
     //page boundary is crossed
     CPU.INS_Cycles += ((address_1 ^ address_2) >> 8) > 0;
     return address_2;
+}
+
+/**
+ * 间接寻址
+ * @return
+ */
+Short AM_ZP_INDIRECT() {
+    Short addr = AM_Abs();
+    return concat_byte(CPU_Read_Addr(addr), CPU_Read_Addr(addr + 1));
 }
 
 //-------------寻址方式结束-----------------
@@ -374,6 +426,99 @@ void INS_Transfer(Byte source,Byte *target,Byte set_flag) {
 void INS_SET_CLEAR(Byte *FLAG,Byte value) {
     CPU.INS_Cycles += 2;
     *FLAG = value;
+}
+
+/**
+ * 将寄存器A推送到栈中
+ * A -> S
+ * Flags: none
+ */
+void INS_PHA() {
+    CPU.INS_Cycles +=2;
+    CPU_Stack_Push_Byte(CPU.A);
+}
+
+/**
+ * 从栈中拉取一个字节到寄存器A
+ * A -> S
+ * Flags: N, Z
+ */
+void INS_PLA() {
+    CPU.INS_Cycles +=3;
+    CPU.A = CPU_Stack_Pull_Byte();
+    CPU_F_NZ(CPU.A);
+}
+
+/**
+ * 将状态寄存器放入栈
+ * P -> S
+ * Flags: none
+ */
+void INS_PHP() {
+    CPU.INS_Cycles +=2;
+    Push_Flag();
+}
+
+/**
+ * 将栈数据放入状态寄存器
+ * S -> P
+ * Flags: ALL
+ */
+void INS_PLP() {
+    CPU.INS_Cycles +=2;
+    Pull_Flag();
+}
+
+/**
+ * 跳转到地址
+ * Flags: none
+ */
+void INS_JMP(Short address) {
+    CPU.INS_Cycles ++;
+    CPU.PC = address;
+}
+
+/**
+ * 跳转到地址
+ * Jump to New Location Saving Return Address
+ * Flags: none
+ */
+void INS_JSR(Short address) {
+    CPU.INS_Cycles +=2;
+    CPU_Stack_Push_Short(CPU.PC-1);
+    CPU.PC = address;
+}
+
+/**
+ * 返回到保存的地址
+ * Return from Subroutine
+ * Flags: none
+ */
+void INS_RTS() {
+    CPU.INS_Cycles ++;
+    INS_JMP(CPU_Stack_Pull_Short() + 1);
+}
+/**
+ * 从异常返回
+ * ReTurn from Interrupt
+ * Flags: none
+ */
+void INS_RTI() {
+    CPU.INS_Cycles +=2;
+    Pull_Flag();
+    CPU.PC = CPU_Stack_Pull_Short();
+}
+
+/**
+ * break 异常
+ */
+void INS_BRK() {
+    CPU.INS_Cycles++;
+    CPU_Stack_Push_Short(CPU.PC + 1);
+    CPU.F_B = 1;
+    Push_Flag();
+    CPU.PC = CPU_Read_Addr(concat_byte(CPU_Read_Addr(0xFFFE),CPU_Read_Addr(0xFFFF)));
+    CPU.F_I = 1;
 }
 
 //-------------指令结束-----------------
@@ -996,38 +1141,64 @@ void CPU_Exec() {
         case 0xB8:
             INS_SET_CLEAR(&CPU.F_V,0);
             break;
+
+        // ------------Stack(栈)------------
+            //PHA
+        case 0x48:
+            INS_PHA();
+            break;
+            //PLA
+        case 0x68:
+            INS_PLA();
+            break;
+            //PHP
+        case 0x08:
+            INS_PHP();
+            break;
+            //PHP
+        case 0x28:
+            INS_PLP();
+            break;
+
+        // ------------Subroutines and Jump(跳转)------------
+            //JMP a
+        case 0x4C:
+            INS_JMP(AM_Abs());
+            break;
+            //JMP (a)
+        case 0x6C:
+            INS_JMP(AM_ZP_INDIRECT());
+            break;
+            //JSR a
+        case 0x20:
+            INS_JSR(AM_Abs());
+            break;
+            //RTS
+        case 0x60:
+            INS_RTS();
+            break;
+            //RTI
+        case 0x40:
+            INS_RTI();
+            break;
+
+        // ------------Miscellaneous------------
+            //BRK
+        case 0x00:
+            INS_BRK();
+            break;
             //NOP
         case 0xEA:
             CPU.INS_Cycles += 2;
             break;
 
-
-        // ------------Stack(栈)------------
-
-//            //PHA
-//        case 0x48:
-//            INS_Stack(CPU.A,&CPU.SP,0);
-//            break;
-//            //PLA
-//        case 0x68:
-//            INS_Transfer(CPU.SP,&CPU.A,1);
-//            break;
-//            //PHP
-//        case 0x08:
-//            INS_Transfer_Stack_Satus(CPU.SP,&CPU.A,0);
-//            break;
     }
 }
 
 int main() {
     CPU_Reset(0x1000);
-    CPU.Mem[CPU.PC]   = 0x90;
-    CPU.Mem[CPU.PC+1] = 0xD9;
-    CPU_Exec();
-
-//    assert(CPU.F_N == 1);
-//    assert(CPU.F_Z == 0);
-//    assert(CPU.F_V == 1);
-    printf("SUCCESS!\n");
+    FILE *fp = fopen("D:\\workspace\\MOS_6502_C\\test.asm","r");
+    compile(fp);
+    fclose(fp);
     return 0;
 }
